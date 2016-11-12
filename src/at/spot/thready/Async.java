@@ -13,16 +13,20 @@ public class Async<R, P> {
 	static final private Map<Long, List<AsyncRunnable<?, ?>>> runnableThreads = new ConcurrentHashMap<>();
 	static final private Map<AsyncRunnable<?, ?>, AsyncCallback<?>> callbackMap = new ConcurrentHashMap<>();
 
+	static final private ThreadLocal<Boolean> keepRunning = new ThreadLocal<>();
+
 	/**
 	 * Prepares a message queue for the current thread, without starting any
 	 * {@link AsyncRunnable}s.
 	 */
-	public static void prepare() {
+	protected static void prepare() {
 		prepare(Thread.currentThread().getId());
 	}
 
 	protected static void prepare(final long threadId) {
-		getMessageQueue(threadId);
+		if (messageQueueMap.get(threadId) == null) {
+			messageQueueMap.put(threadId, new ConcurrentLinkedQueue<>());
+		}
 	}
 
 	/**
@@ -83,8 +87,13 @@ public class Async<R, P> {
 			return value;
 		};
 
-		getRunnableThreads(threadId).add(payload.runnable);
-		getMessageQueue(threadId).add(payload);
+		final Queue<?> queue = getMessageQueue(threadId);
+
+		synchronized (queue) {
+			getRunnableThreads(threadId).add(payload.runnable);
+			getMessageQueue(threadId).add(payload);
+			getMessageQueue(threadId).notify();
+		}
 	}
 
 	/**
@@ -104,7 +113,7 @@ public class Async<R, P> {
 		synchronized (currentQueue) {
 			// get the async callback for that thread
 
-			while (!finishCondition.allFinished()) {
+			while (!finishCondition.finished()) {
 				try {
 					if (currentQueue.peek() == null) {
 						currentQueue.wait();
@@ -137,6 +146,24 @@ public class Async<R, P> {
 		});
 	}
 
+	/**
+	 * Same as {@link #await()} - the finish condition is true as soon as the
+	 * {@link #stop()} method is called from the original thread (eg. from an
+	 * {@link AsyncRunnable} or {@link AsyncCallback}).
+	 * 
+	 */
+	public static synchronized void loop() throws AsyncQueueException {
+		// prepare the message loop
+		prepare();
+
+		// tell the finish condition to run until the flag is set to false
+		keepRunning.set(true);
+
+		await(() -> {
+			return !keepRunning.get();
+		});
+	}
+
 	protected static long getCurrentThreadId() {
 		return Thread.currentThread().getId();
 	}
@@ -158,14 +185,9 @@ public class Async<R, P> {
 	}
 
 	protected static Queue<Payload<?, ?>> getMessageQueue(final long threadId) {
-		Queue<Payload<?, ?>> queue = messageQueueMap.get(threadId);
+		prepare(threadId);
 
-		if (queue == null) {
-			queue = new ConcurrentLinkedQueue<>();
-			messageQueueMap.put(threadId, queue);
-		}
-
-		return queue;
+		return messageQueueMap.get(threadId);
 	}
 
 	/**
@@ -194,6 +216,10 @@ public class Async<R, P> {
 
 		@Override
 		public abstract void run();
+	}
+
+	public static void stop() {
+		keepRunning.set(false);
 	}
 
 	private static class Payload<RETURNTYPE, PARAMETERTYPE> {

@@ -11,11 +11,11 @@ public class AsyncTest {
 
 		// submit two different runnable threads and wait for their return
 		// runnable and callback can be written as lambdas
-		Async.run(runnable, callback, "test");
-		Async.run(runnable, callback, "3");
-
-		Async.run(runnable2, callback, 777l);
-		Async.run(runnable2, callback, 333l);
+		// Async.run(runnable, callback, "test");
+		// Async.run(runnable, callback, "3");
+		//
+		// Async.run(runnable2, callback, 777l);
+		// Async.run(runnable2, callback, 333l);
 
 		// the thread waits till all async runnables are finished.
 		Async.await();
@@ -27,6 +27,7 @@ public class AsyncTest {
 		final Thread testThread = new Thread(new Runnable() {
 			@Override
 			public void run() {
+				// ThreadUtil.sleep(3);
 				Async.handleMessage("Generic thread test", currentThreadId, callback);
 			}
 		});
@@ -36,7 +37,7 @@ public class AsyncTest {
 		// fake some other work in this thread
 		ThreadUtil.sleep(3);
 
-		Async.await();
+		Async.loop();
 
 		System.out.println("All external threads finished");
 	}
