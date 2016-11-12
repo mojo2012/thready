@@ -1,11 +1,3 @@
-# thready
-## A lightweight easy-to-use Java threading micro-framework
-
-Thready allows you to start several "runnables" and wait for them to be finished.
-The runnables invoke a callback that is executed on the in the initial calling thread.
-
-Example:
-```
 package at.spot.thready;
 
 import java.util.Random;
@@ -61,5 +53,3 @@ public class AsyncTest {
 		}
 	};
 }
-
-``
