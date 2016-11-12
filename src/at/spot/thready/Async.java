@@ -9,9 +9,21 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Async<R, P> {
 
-	static final private Map<Long, Queue<Object>> messageQueueMap = new ConcurrentHashMap<>();
-	static final private Map<Long, AsyncCallback<?>> callbackMap = new ConcurrentHashMap<>();
-	static final private Map<Long, List<RunnableThread>> runnableThreads = new ConcurrentHashMap<>();
+	static final private Map<Long, Queue<Payload<?, ?>>> messageQueueMap = new ConcurrentHashMap<>();
+	static final private Map<Long, List<AsyncRunnable<?, ?>>> runnableThreads = new ConcurrentHashMap<>();
+	static final private Map<AsyncRunnable<?, ?>, AsyncCallback<?>> callbackMap = new ConcurrentHashMap<>();
+
+	/**
+	 * Prepares a message queue for the current thread, without starting any
+	 * {@link AsyncRunnable}s.
+	 */
+	public static void prepare() {
+		prepare(Thread.currentThread().getId());
+	}
+
+	protected static void prepare(final long threadId) {
+		getMessageQueue(threadId);
+	}
 
 	/**
 	 * The first call of the {@link #run()} method creates a message queue for
@@ -26,28 +38,53 @@ public class Async<R, P> {
 
 		final long threadId = Thread.currentThread().getId();
 
-		getMessageQueue(threadId);
-		callbackMap.put(threadId, callback);
+		// prepare the message loop
+		prepare();
 
-		final RunnableThread runnableThread = new RunnableThread(threadId) {
+		final Payload<RETURNVALUE, PARAMTERTYPE> config = new Payload<>();
+		config.runnable = action;
+		config.targetThreadId = threadId;
+		config.callback = callback;
+
+		final RunnableThread<RETURNVALUE, PARAMTERTYPE> runnableThread = new RunnableThread<RETURNVALUE, PARAMTERTYPE>(
+				config) {
 			@Override
 			public void run() {
-				final RETURNVALUE o = action.doJob(actonArgument);
+				// execute action and store return value in the payload
+				setReturnValue(action.doJob(actonArgument));
 
-				final Queue<Object> queue = messageQueueMap.get(getCallbackThreadId());
+				final Queue<Payload<?, ?>> queue = messageQueueMap.get(getCallbackThreadId());
 
+				// add the payload to the message queue
 				synchronized (queue) {
-					queue.add(o);
+					queue.add(getPayload());
 					queue.notify();
 				}
-
-				runnableThreads.get(threadId).remove(this);
 			}
 		};
 
-		getRunnableThreads(threadId).add(runnableThread);
+		getRunnableThreads(threadId).add(action);
 
 		runnableThread.start();
+	}
+
+	/**
+	 * Allows to inject messages into the message loop of thead with the given
+	 * thread id. This thread needs to call the {@link #await()} method to
+	 * process the messages.
+	 */
+	public static <RETURNVALUE, PARAMTYPE> void handleMessage(final RETURNVALUE value, final long threadId,
+			final AsyncCallback<RETURNVALUE> callback) {
+
+		final Payload<RETURNVALUE, PARAMTYPE> payload = new Payload<>();
+		payload.callback = callback;
+		payload.returnValue = value;
+		payload.runnable = (n) -> {
+			return value;
+		};
+
+		getRunnableThreads(threadId).add(payload.runnable);
+		getMessageQueue(threadId).add(payload);
 	}
 
 	/**
@@ -61,25 +98,28 @@ public class Async<R, P> {
 		final long threadId = getCurrentThreadId();
 
 		// gets the current thread message queue
-		final Queue<Object> currentQueue = getMessageQueue(threadId);
+		final Queue<Payload<?, ?>> currentQueue = getMessageQueue(threadId);
 
 		// synchronize on the queue so we can use the wait/notify mechanism
 		synchronized (currentQueue) {
 			// get the async callback for that thread
-			final AsyncCallback callback = callbackMap.get(threadId);
 
 			while (!finishCondition.allFinished()) {
 				try {
-					currentQueue.wait();
+					if (currentQueue.peek() == null) {
+						currentQueue.wait();
+					}
 				} catch (final InterruptedException e) {
-					throw new AsyncQueueException("Could not start watching the thread message queue", e);
+					throw new AsyncQueueException("Could not start watching the thread message queue.", e);
 				}
 
-				final Object q = currentQueue.poll();
+				final Payload payload = currentQueue.poll();
 
-				if (q != null) {
+				if (payload != null) {
+					runnableThreads.get(threadId).remove(payload.runnable);
+
 					// execute callback in original thread Callback
-					callback.callback(q);
+					payload.callback.callback(payload.returnValue);
 				}
 			}
 		}
@@ -101,19 +141,24 @@ public class Async<R, P> {
 		return Thread.currentThread().getId();
 	}
 
-	protected static List<RunnableThread> getRunnableThreads(final long threadId) {
-		List<RunnableThread> threads = runnableThreads.get(threadId);
+	protected static List<AsyncRunnable<?, ?>> getRunnableThreads(final long threadId) {
+		List<AsyncRunnable<?, ?>> runnable = runnableThreads.get(threadId);
 
-		if (threads == null) {
-			threads = new ArrayList<>();
-			runnableThreads.put(threadId, threads);
+		if (runnable == null) {
+			runnable = new ArrayList<>();
+			runnableThreads.put(threadId, runnable);
 		}
 
-		return threads;
+		return runnable;
 	}
 
-	protected static Queue<Object> getMessageQueue(final long threadId) {
-		Queue<Object> queue = messageQueueMap.get(threadId);
+	protected AsyncCallback<?> getCallbackForRunnable(final AsyncRunnable<?, ?> runnable) {
+		final AsyncCallback<?> callback = callbackMap.get(runnable);
+		return callback;
+	}
+
+	protected static Queue<Payload<?, ?>> getMessageQueue(final long threadId) {
+		Queue<Payload<?, ?>> queue = messageQueueMap.get(threadId);
 
 		if (queue == null) {
 			queue = new ConcurrentLinkedQueue<>();
@@ -128,18 +173,33 @@ public class Async<R, P> {
 	 * into the original thread's message queue.
 	 *
 	 */
-	private static abstract class RunnableThread extends Thread {
-		private final Long callbackThreadId;
+	private static abstract class RunnableThread<RETURNTYPE, PARAMETERTYPE> extends Thread {
+		private final Payload<RETURNTYPE, PARAMETERTYPE> runnablePackage;
 
-		public RunnableThread(final Long callbackThreadId) {
-			this.callbackThreadId = callbackThreadId;
+		public RunnableThread(final Payload<RETURNTYPE, PARAMETERTYPE> runnablePackage) {
+			this.runnablePackage = runnablePackage;
 		}
 
 		protected Long getCallbackThreadId() {
-			return this.callbackThreadId;
+			return this.runnablePackage.targetThreadId;
+		}
+
+		protected void setReturnValue(final RETURNTYPE returnValue) {
+			runnablePackage.returnValue = returnValue;
+		}
+
+		protected Payload<RETURNTYPE, PARAMETERTYPE> getPayload() {
+			return this.runnablePackage;
 		}
 
 		@Override
 		public abstract void run();
+	}
+
+	private static class Payload<RETURNTYPE, PARAMETERTYPE> {
+		public AsyncRunnable<RETURNTYPE, PARAMETERTYPE> runnable;
+		public AsyncCallback<RETURNTYPE> callback;
+		public long targetThreadId;
+		public RETURNTYPE returnValue;
 	}
 }
